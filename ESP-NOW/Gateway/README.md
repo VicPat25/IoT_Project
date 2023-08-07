@@ -23,10 +23,20 @@ En una red que utiliza ESP-NOW, el gateway juega un papel crucial al funcionar c
 
 ### ESTRUCTURA
 
-El código proporcionado es un ejemplo que muestra cómo utilizar el protocolo de comunicación ESP-NOW en un dispositivo ESP32 para controlar un LED de manera remota desde otro dispositivo. El programa se ejecuta en un nodo de la red ESP-NOW, que actúa como el receptor de los comandos enviados por un dispositivo remoto, conocido como el iniciador.
+El código proporcionado es un ejemplo que muestra cómo utilizar el protocolo de comunicación ESP-NOW en un ESP32 para enviar y recibir datos entre dispositivos. 
 
-En este código, se incluyen las librerías necesarias para el funcionamiento del programa, como las de FreeRTOS para la gestión de tareas, las de ESP-NOW para la comunicación inalámbrica, y otras para el manejo de pines GPIO y la configuración de Wi-Fi.
+El código define constantes como "ESP_CHANNEL" para el número de canal en ESP-NOW y "LED_PIN" para el número del pin que controla el LED. Además, se declaran variables y arreglos necesarios para almacenar información sobre los dispositivos remotos con los que se comunicará el ESP32.
 
-El programa comienza inicializando el módulo Wi-Fi del ESP32 y configurándolo en modo estación (STA). También se inicia el protocolo ESP-NOW y se registran las funciones de devolución de llamada para recibir y enviar datos. Se registra el dispositivo remoto en la red ESP-NOW para establecer la comunicación.
+Se declara una función para inicializar el Wi-Fi ("init_wifi"), que utiliza las librerías mencionadas anteriormente para configurar la conexión Wi-Fi en el ESP32.
 
-Una vez que todo está configurado, el programa entra en un bucle infinito donde se alterna el estado del LED cada segundo. Cuando el LED cambia de estado, se envía la información del nuevo estado al dispositivo remoto a través de ESP-NOW.
+La función de devolución de llamada "recv_cb" se utiliza para recibir datos mediante ESP-NOW. Verifica el tamaño de los datos recibidos y almacena las temperaturas recibidas de cada responder, así como su estado de conexión y el tiempo de la última actualización.
+
+La función "check_disconnections" se utiliza para verificar si ha habido desconexiones de los nodos remotos y actualiza su estado en consecuencia.
+
+La función de devolución de llamada "send_cb" se encarga de mostrar mensajes de depuración indicando si el envío de datos mediante ESP-NOW ha sido exitoso o no.
+
+Existen funciones para inicializar el protocolo ESP-NOW ("init_esp_now") y para registrar los dispositivos remotos ("register_peers"), donde se utilizan las librerías relevantes para configurar y registrar los peers para la comunicación mediante ESP-NOW.
+
+Se definen funciones para inicializar el LED ("init_led") y cambiar su estado ("toggle_led"), utilizando la librería "driver/gpio.h" para controlar el LED.
+
+La función principal "app_main" es donde se inicia el programa. En esta función, se invocan las funciones de inicialización y registro, y se entra en un bucle principal para mantener el programa en ejecución. En este bucle, se verifica la conexión de los nodos remotos, se cambia el estado del LED y se envía el estado del LED a cada uno de los responders registrados mediante ESP-NOW. Además, se muestra un mensaje de depuración para indicar que se ha enviado el estado del LED a todos los responders, y luego se espera 1 segundo antes de repetir el bucle.
