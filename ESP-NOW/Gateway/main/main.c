@@ -1,203 +1,272 @@
-#include <stdio.h>                 // Librería estándar de entrada y salida de datos.
-#include "string.h"                // Librería para funciones de manejo de cadenas de caracteres.
-#include "freertos/FreeRTOS.h"     // Librería para el sistema operativo en tiempo real FreeRTOS.
-#include "freertos/task.h"         // Librería para crear y gestionar tareas en FreeRTOS.
-#include "esp_now.h"               // Librería para utilizar el protocolo de comunicación ESP-NOW.
-#include "esp_wifi.h"              // Librería para configurar y gestionar el módulo Wi-Fi del ESP32.
-#include "esp_netif.h"             // Librería para manejar interfaces de red en ESP32.
-#include "esp_mac.h"               // Librería para obtener la dirección MAC del ESP32.
-#include "esp_event.h"             // Librería para gestionar eventos en ESP32.
-#include "nvs_flash.h"             // Librería para el almacenamiento no volátil (NVS) en ESP32.
-#include "esp_log.h"               // Librería para el registro de mensajes (logs) en ESP32.
-#include "driver/gpio.h"           // Librería para controlar los pines GPIO en ESP32.
+#include <stdio.h>
+#include "string.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_now.h"
+#include "esp_wifi.h"
+#include "esp_netif.h"
+#include "esp_mac.h"
+#include "esp_event.h"
+#include "nvs_flash.h"
+#include "esp_log.h"
+#include "driver/gpio.h"
+#include "driver/uart.h"
 
-#define ESP_CHANNEL 1              // Definición de un número de canal para ESP-NOW.
-#define LED_PIN 2                  // Definición del número del pin que controla el LED.
+#define ESP_CHANNEL 1
+#define LED_PIN 2
+#define LED_PIN1 32
+#define LED_PIN2 33
+uint8_t led_state = 0;
 
-uint8_t led_state = 0;             // Variable para almacenar el estado del LED.
-
-//Dirección MAC del dispositivo remoto (nodo) con el que se va a comunicar
 #define MAX_RESPONDERS 4
 static uint8_t responder_macs[MAX_RESPONDERS][ESP_NOW_ETH_ALEN] = {
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // Mac del Nodo1 (Responder)
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // Mac del Nodo2 (Responder)
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // Mac del Nodo3 (Responder)
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // Mac del Nodo4 (Responder)
+    {0x58, 0xbf, 0x25, 0x05, 0x6f, 0xf8},
+    {0x30, 0xc6, 0xf7, 0x1e, 0x8e, 0x0c},
+    {0x3c, 0x61, 0x05, 0x13, 0x75, 0xe4},
+    {0xf0, 0x08, 0xd1, 0xd8, 0x26, 0x00}
 };
 
-static float temperatures[MAX_RESPONDERS] = {0.0}; // Array to store temperatures
-static bool connected[MAX_RESPONDERS] = {false};   // Array to track node connection status
-static TickType_t last_update[MAX_RESPONDERS] = {0}; // Array to track last update time
+static float temperatures[MAX_RESPONDERS] = {0.0};
+static bool connected[MAX_RESPONDERS] = {false};
+static TickType_t last_update[MAX_RESPONDERS] = {0};
 
-#define DISCONNECT_THRESHOLD_MS 3000 // Tiempo para determinar cuándo se considera que un nodo está desconectado
-#define MAX_DISCONNECT_TIMEOUT_MS 5000 // Tiempo máximo que un nodo puede estar desconectado antes de que se actualice su estado en el arreglo
+#define DISCONNECT_THRESHOLD_MS 2000
+#define MAX_DISCONNECT_TIMEOUT_MS 3000
 
-// Etiqueta para los registros de ESP_LOG, utilizada para identificar los mensajes de registro
 static const char *TAG = "esp_now_init";
 
-static esp_err_t init_wifi(void); // Declaración de la función para inicializar el Wi-Fi.
-void recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int data_len); // Declaración de la función de devolución de llamada a datos mediante ESP-NOW.
-void check_disconnections(); // Declaracion de la función para verificar si alguno de los nodos conectados a través de ESP-NOW se ha desconectado
-void send_cb(const uint8_t *mac_addr, esp_now_send_status_t status); // Declaración de la función de devolución de llamada para enviar datos mediante ESP-NOW.
-static esp_err_t init_esp_now(void); // Declaración de la función para inicializar el protocolo ESP-NOW.
-static esp_err_t register_peer(uint8_t *peer_addr); // Declaración de la función para registrar un dispositivo remoto.
-esp_err_t init_led(void); // Declaración de la función para inicializar el LED.
-esp_err_t toggle_led(void); // Declaración de la función para cambiar el estado del LED.
+static esp_err_t init_wifi(void);
+void recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int data_len);
+void check_disconnections();
+void send_cb(const uint8_t *mac_addr, esp_now_send_status_t status);
+static esp_err_t init_esp_now(void);
+static esp_err_t register_peer(uint8_t *peer_addr);
+esp_err_t init_led(void);
 
-// Función para inicializar el WiFi
+#define BUF_SIZE (1024)
+
+static QueueHandle_t uart_queue;
+
+void uart_event_task(void *pvParameters) {
+    uart_event_t event;
+    uint8_t *dtmp = (uint8_t *)malloc(BUF_SIZE);
+    while (1) {
+    if (xQueueReceive(uart_queue, (void *)&event, portMAX_DELAY)) {
+            if (event.type == UART_DATA) {
+                uint8_t* data = (uint8_t*) malloc(event.size);
+                uart_read_bytes(UART_NUM_0, data, event.size, portMAX_DELAY);
+                for (int i = 0; i < event.size; i++) {
+                    char inChar = (char)data[i];
+                    if (inChar == '\n') {
+                        if (strncmp((char*)dtmp, "$On1", 4) == 0) {
+                            gpio_set_level(LED_PIN1, 1);
+
+                            for (int i = 0; i < MAX_RESPONDERS; i++)
+                                {
+                                    if (memcmp(responder_macs[i], (uint8_t[]){0x58, 0xbf, 0x25, 0x05, 0x6f, 0xf8}, ESP_NOW_ETH_ALEN) == 0)
+                                    {
+                                        uint8_t data = 1;
+                                        esp_err_t result = esp_now_send(responder_macs[i], &data, sizeof(data));
+                                        break; // Solo queremos enviar una vez a la MAC específica
+                                    }
+                                }
+
+
+                        } else if (strncmp((char*)dtmp, "$Off1", 5) == 0) {
+                            gpio_set_level(LED_PIN1, 0);
+
+                            for (int i = 0; i < MAX_RESPONDERS; i++)
+                                {
+                                    if (memcmp(responder_macs[i], (uint8_t[]){0x58, 0xbf, 0x25, 0x05, 0x6f, 0xf8}, ESP_NOW_ETH_ALEN) == 0)
+                                    {
+                                        uint8_t data = 0;
+                                        esp_err_t result = esp_now_send(responder_macs[i], &data, sizeof(data));
+                                        break; // Solo queremos enviar una vez a la MAC específica
+                                    }
+                                }
+
+                        } else if (strncmp((char*)dtmp, "$On2", 4) == 0) {
+                            gpio_set_level(LED_PIN2, 1);
+
+                            for (int i = 0; i < MAX_RESPONDERS; i++)
+                                {
+                                    if (memcmp(responder_macs[i], (uint8_t[]){0x30, 0xc6, 0xf7, 0x1e, 0x8e, 0x0c}, ESP_NOW_ETH_ALEN) == 0)
+                                    {
+                                        uint8_t data = 1;
+                                        esp_err_t result = esp_now_send(responder_macs[i], &data, sizeof(data));
+                                        break; // Solo queremos enviar una vez a la MAC específica
+                                    }
+                                }
+
+                        } else if (strncmp((char*)dtmp, "$Off2", 5) == 0) {
+                            gpio_set_level(LED_PIN2, 0);
+                            
+                            for (int i = 0; i < MAX_RESPONDERS; i++)
+                                {
+                                    if (memcmp(responder_macs[i], (uint8_t[]){0x30, 0xc6, 0xf7, 0x1e, 0x8e, 0x0c}, ESP_NOW_ETH_ALEN) == 0)
+                                    {
+                                        uint8_t data = 0;
+                                        esp_err_t result = esp_now_send(responder_macs[i], &data, sizeof(data));
+                                        break; // Solo queremos enviar una vez a la MAC específica
+                                    }
+                                }
+                        }
+                        memset(dtmp, 0, BUF_SIZE);
+                    } else {
+                        if (strlen((char*)dtmp) < BUF_SIZE - 1) {
+                            strncat((char*)dtmp, &inChar, 1);
+                        }
+                    }
+                }
+                free(data);
+            }
+        }
+    }
+    free(dtmp);
+}
+
 static esp_err_t init_wifi(void)
 {
-    wifi_init_config_t wifi_init_config = WIFI_INIT_CONFIG_DEFAULT(); // Configuración predeterminada de WiFi.
-    esp_netif_init(); // Inicializar el subsistema de red en el ESP32.
-    esp_event_loop_create_default(); // Crear un bucle de eventos predeterminado.
-    nvs_flash_init(); // Inicializar la memoria flash no volátil (NVS).
-    esp_wifi_init(&wifi_init_config); // Inicializar el módulo WiFi con la configuración predeterminada.
-    esp_wifi_set_mode(WIFI_MODE_STA); // Configurar el modo estación (STA) para el WiFi.
-    esp_wifi_set_storage(WIFI_STORAGE_FLASH); // Configurar el almacenamiento de datos WiFi en la memoria flash.
-    esp_wifi_start(); // Iniciar el módulo WiFi.
-    ESP_LOGI(TAG, "wifi init completed"); // Mostrar mensaje de depuración para indicar que la inicialización del Wi-Fi se ha completado.
-    return ESP_OK; // Devolver ESP_OK para indicar que no ha habido errores.
+    wifi_init_config_t wifi_init_config = WIFI_INIT_CONFIG_DEFAULT();
+    esp_netif_init();
+    esp_event_loop_create_default();
+    nvs_flash_init();
+    esp_wifi_init(&wifi_init_config);
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_set_storage(WIFI_STORAGE_FLASH);
+    esp_wifi_start();
+    return ESP_OK;
 }
+
 void recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int data_len)
 {
-    if (data_len == sizeof(float)) // Verificar si la longitud de los datos recibidos es igual al tamaño de un tipo float (4 bytes).
+    if (data_len == sizeof(float))
     {
         float temperature;
-        memcpy(&temperature, data, sizeof(float)); // Copiar los datos recibidos al puntero temperature utilizando memcpy.
-
-        // Buscar el índice del nodo remitente en el arreglo responder_macs.
+        memcpy(&temperature, data, sizeof(float));
         int index = -1;
         for (int i = 0; i < MAX_RESPONDERS; i++)
         {
-            // Comparar las direcciones MAC del nodo remitente con las direcciones MAC almacenadas en responder_macs.
             if (memcmp(esp_now_info->src_addr, responder_macs[i], ESP_NOW_ETH_ALEN) == 0)
             {
-                // Si se encuentra una coincidencia, establecer el índice en el valor encontrado y salir del bucle.
                 index = i;
                 break;
             }
         }
-
-        // Verificar si se encontró un índice válido para el nodo remitente.
         if (index >= 0 && index < MAX_RESPONDERS)
         {
-            temperatures[index] = temperature; // Actualizar la temperatura recibida en el arreglo temperatures en la posición correspondiente al nodo remitente.
-            connected[index] = true; // Marcar el nodo como conectado estableciendo el valor de connected a true.
-            last_update[index] = xTaskGetTickCount(); // Actualizar el tiempo de la última actualización en el arreglo last_update.
-            // Mostrar un mensaje de información en los logs que indica la recepción de la temperatura del nodo remitente.
-            ESP_LOGI(TAG, "Received temperature from N%d: %.2f C", index + 1, temperature);
+            temperatures[index] = temperature;
+            connected[index] = true;
+            last_update[index] = xTaskGetTickCount();
         }
     }
 }
 
-void check_disconnections() 
+void check_disconnections()
 {
-    // Obtener el tiempo actual en milisegundos utilizando la función xTaskGetTickCount().
     TickType_t current_time = xTaskGetTickCount();
-
-    for (int i = 0; i < MAX_RESPONDERS; i++) // Recorrer el arreglo connected para verificar si ha habido desconexiones de nodos.
-    {
-        // Verificar si el nodo está marcado como conectado y si ha superado el umbral de desconexión.
-        if (connected[i] && (current_time - last_update[i]) >= pdMS_TO_TICKS(MAX_DISCONNECT_TIMEOUT_MS))
-        {
-            connected[i] = false; // Marcar el nodo como desconectado estableciendo el valor de connected a false.
-            temperatures[i] = 0.0; // Restablecer el valor de temperatura en temperatures a 0.0.
-            // Mostrar un mensaje de advertencia en los logs indicando que el nodo se ha desconectado.
-            ESP_LOGW(TAG, "Responder %d disconnected", i + 1);
-        }
-    }
-}
-
-// Función de devolución de llamada para enviar datos mediante ESP-NOW.
-void send_cb(const uint8_t *mac_addr, esp_now_send_status_t status)
-{
-    if (status == ESP_NOW_SEND_SUCCESS) // Comprobar si el envío fue exitoso.
-    {
-        ESP_LOGI(TAG, "Data sent to " MACSTR " successfully", MAC2STR(mac_addr)); // Mostrar mensaje de depuración si el envío fue exitoso.
-    }
-    else
-    {
-        ESP_LOGW(TAG, "Data sending to " MACSTR " failed", MAC2STR(mac_addr)); // Mostrar mensaje de advertencia si el envío falló.
-    }
-}
-
-// Función para inicializar el protocolo ESP-NOW.
-static esp_err_t init_esp_now(void)
-{
-    esp_err_t err = esp_now_init(); // Inicializar ESP-NOW y almacenar el resultado en la variable err.
-
-    if (err == ESP_OK) // Verificar si la inicialización de ESP-NOW fue exitosa.
-    {
-        esp_now_register_recv_cb(recv_cb); // Si fue exitosa, registrar la función de devolución de llamada recv_cb para recibir datos mediante ESP-NOW.
-        ESP_LOGI(TAG, "esp now completed"); // Mostrar un mensaje de información en los logs para indicar que la inicialización de ESP-NOW se ha completado.
-    }
-    else
-    {
-        ESP_LOGE(TAG, "esp now init failed: %s", esp_err_to_name(err)); // Si la inicialización falló, mostrar un mensaje de error en los logs con el código de error correspondiente.
-
-    }
-    return err; // Devolver el resultado de la inicialización de ESP-NOW (ESP_OK si fue exitosa, o un código de error en caso contrario).
-}
-
-// Función para registrar un dispositivo remoto.
-static esp_err_t register_peers(void)
-{
-    // Bucle para registrar cada uno de los dispositivos remotos (peers) en ESP-NOW.
     for (int i = 0; i < MAX_RESPONDERS; i++)
     {
-        esp_now_peer_info_t esp_now_peer_info = {}; // Inicializar la estructura para la información del dispositivo remoto.
-        memcpy(esp_now_peer_info.peer_addr, responder_macs[i], ESP_NOW_ETH_ALEN); // Copiar la dirección MAC del peer desde el array responder_macs[i] a la estructura esp_now_peer_info.
-        esp_now_peer_info.channel = ESP_CHANNEL; // Configurar el número de canal para la comunicación con el peer.
-        esp_now_peer_info.ifidx = ESP_IF_WIFI_STA; // Configurar el índice de interfaz WiFi para el peer (ESP_IF_WIFI_STA para el modo estación).
-        esp_err_t err = esp_now_add_peer(&esp_now_peer_info); // Añadir el peer a la lista de peers de ESP-NOW y almacenar el resultado en la variable err.
-
-        if (err == ESP_OK) // Verificar si el registro del peer fue exitoso.
+        if (connected[i] && (current_time - last_update[i]) >= pdMS_TO_TICKS(MAX_DISCONNECT_TIMEOUT_MS))
         {
-            ESP_LOGI(TAG, "Peer %d registered", i + 1); // Si fue exitoso, mostrar un mensaje de información en los logs indicando que el peer ha sido registrado.
-        }
-        else
-        {
-            ESP_LOGE(TAG, "Peer %d registration failed: %s", i + 1, esp_err_to_name(err)); // Si el registro falló, mostrar un mensaje de error en los logs con el código de error correspondiente.
+            connected[i] = false;
+            temperatures[i] = 0.0;
         }
     }
-    return ESP_OK; // Devolver ESP_OK para indicar que no ha habido errores durante el registro de los peers.
 }
 
-// Función para inicializar el LED.
+void send_cb(const uint8_t *mac_addr, esp_now_send_status_t status)
+{
+    if (status == ESP_NOW_SEND_SUCCESS)
+    {
+        ESP_LOGI(TAG, "Data sent to " MACSTR " successfully", MAC2STR(mac_addr));
+    }
+    else
+    {
+        ESP_LOGW(TAG, "Data sending to " MACSTR " failed", MAC2STR(mac_addr));
+    }
+}
+
+static esp_err_t init_esp_now(void)
+{
+    esp_err_t err = esp_now_init();
+    if (err == ESP_OK)
+    {
+        esp_now_register_recv_cb(recv_cb);
+    }
+    return err;
+}
+
+static esp_err_t register_peers(void)
+{
+    for (int i = 0; i < MAX_RESPONDERS; i++)
+    {
+        esp_now_peer_info_t esp_now_peer_info = {};
+        memcpy(esp_now_peer_info.peer_addr, responder_macs[i], ESP_NOW_ETH_ALEN);
+        esp_now_peer_info.channel = ESP_CHANNEL;
+        esp_now_peer_info.ifidx = ESP_IF_WIFI_STA;
+        esp_err_t err = esp_now_add_peer(&esp_now_peer_info);
+    }
+    return ESP_OK;
+}
+
 esp_err_t init_led(void)
 {
-    gpio_reset_pin(LED_PIN); // Reiniciar el pin GPIO que controla el LED.
-    gpio_set_direction(LED_PIN, GPIO_MODE_OUTPUT); // Configurar el pin GPIO como salida.
-    return ESP_OK; // Devolver ESP_OK para indicar que no ha habido errores.
+    gpio_reset_pin(LED_PIN);
+    gpio_set_direction(LED_PIN, GPIO_MODE_OUTPUT);
+    return ESP_OK;
 }
 
-// Función para cambiar el estado del LED.
-esp_err_t toggle_led(void)
-{
-    led_state = !led_state; // Cambiar el estado del LED (encendido/apagado).
-    gpio_set_level(LED_PIN, led_state); // Actualizar el valor del pin GPIO para reflejar el estado del LED.
-    return ESP_OK; // Devolver ESP_OK para indicar que no ha habido errores.
-}
 
-// Función principal del programa.
+
+
 void app_main(void)
 {
-   ESP_ERROR_CHECK(init_wifi()); // Inicializar el Wi-Fi y verificar si hay errores en su ejecución.
-    ESP_ERROR_CHECK(init_esp_now()); // Inicializar ESP-NOW y verificar si hay errores en su ejecución.
-    ESP_ERROR_CHECK(register_peers()); // Registrar el dispositivo remoto para la comunicación mediante ESP-NOW.
-    ESP_ERROR_CHECK(init_led()); // Inicializar el LED y verificar si hay errores en su ejecución.
+    init_wifi();
+    init_esp_now();
+    register_peers();
+    init_led();
 
-    while (1) // Bucle principal para mantener el programa en ejecución.
+    uart_config_t uart_config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE
+    };
+    uart_param_config(UART_NUM_0, &uart_config);
+    uart_driver_install(UART_NUM_0, 256, 0, 10, &uart_queue, 0);
+
+    gpio_set_direction(LED_PIN1, GPIO_MODE_OUTPUT);
+    gpio_set_direction(LED_PIN2, GPIO_MODE_OUTPUT);
+
+    xTaskCreate(uart_event_task, "uart_event_task", 2048, NULL, 1, NULL);
+
+    while (1)
     {
-        check_disconnections(); // Verificar si hay nodos desconectados y actualizar su estado.
-        toggle_led(); // Cambiar el estado del LED.
-        // Enviar el estado del LED a cada uno de los responders registrados.
+        check_disconnections();
+
+
+        vTaskDelay(pdMS_TO_TICKS(100)); // Pequeña pausa para evitar un bucle de ocupación del CPU
+
         for (int i = 0; i < MAX_RESPONDERS; i++)
         {
-            esp_now_send(responder_macs[i], &led_state, sizeof(led_state));
-        }
-        ESP_LOGI(TAG, "___________________________"); // Mostrar mensaje de depuración para indicar que se ha enviado el estado del LED a todos los responders.
+            if (connected[i])
+            {
+                printf("%.2f", temperatures[i]);
+            }
+            else
+            {
+                printf("0");
+            }
 
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Esperar 1000 milisegundos (1 segundo) antes de repetir el proceso.
+            if (i < MAX_RESPONDERS - 1)
+            {
+                printf(", ");
+            }
+        }
+        printf("\n");
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
